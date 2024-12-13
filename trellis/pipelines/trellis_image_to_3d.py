@@ -36,6 +36,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         if models is None:
             return
         super().__init__(models)
+        self._device = next(self.models['image_cond_model'].parameters()).device
         self.sparse_structure_sampler = sparse_structure_sampler
         self.slat_sampler = slat_sampler
         self.sparse_structure_sampler_params = {}
@@ -44,6 +45,24 @@ class TrellisImageTo3DPipeline(Pipeline):
         self.rembg_session = None
         self._init_image_cond_model(image_cond_model)
 
+    @property
+    def device(self) -> torch.device:
+        """Override device property to ensure it persists"""
+        if not hasattr(self, '_device'):
+            self._device = torch.device('cuda')
+        return self._device
+
+    def load_model(self, model_key: str) -> nn.Module:
+        """Move a model to CUDA and return it."""
+        self.models[model_key].to(torch.device('cuda'))
+        return self.models[model_key]
+
+    def unload_models(self, model_keys: List[str]):
+        """Unload models to CPU."""
+        for key in model_keys:
+            if key in self.models:
+                self.models[key].to(torch.device("cpu"))
+            
     @staticmethod
     def from_pretrained(path: str) -> "TrellisImageTo3DPipeline":
         """
@@ -140,8 +159,9 @@ class TrellisImageTo3DPipeline(Pipeline):
             raise ValueError(f"Unsupported type of image: {type(image)}")
         
         image = self.image_cond_model_transform(image).to(self.device)
-        features = self.models['image_cond_model'](image, is_training=True)['x_prenorm']
+        features = self.load_model('image_cond_model')(image, is_training=True)['x_prenorm']
         patchtokens = F.layer_norm(features, features.shape[-1:])
+        self.unload_models(['image_cond_model'])
         return patchtokens
         
     def get_cond(self, image: Union[torch.Tensor, list[Image.Image]]) -> dict:
@@ -176,7 +196,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
         """
         # Sample occupancy latent
-        flow_model = self.models['sparse_structure_flow_model']
+        flow_model = self.load_model('sparse_structure_flow_model')
         reso = flow_model.resolution
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
@@ -187,10 +207,12 @@ class TrellisImageTo3DPipeline(Pipeline):
             **sampler_params,
             verbose=True
         ).samples
+        self.unload_models(['sparse_structure_flow_model',])
         
         # Decode occupancy latent
-        decoder = self.models['sparse_structure_decoder']
+        decoder = self.load_model('sparse_structure_decoder')
         coords = torch.argwhere(decoder(z_s)>0)[:, [0, 2, 3, 4]].int()
+        self.unload_models(['sparse_structure_decoder'])
 
         return coords
 
@@ -211,11 +233,15 @@ class TrellisImageTo3DPipeline(Pipeline):
         """
         ret = {}
         if 'mesh' in formats:
-            ret['mesh'] = self.models['slat_decoder_mesh'](slat)
+            ret['mesh'] = self.load_model('slat_decoder_mesh')(slat)
+            self.unload_models(['slat_decoder_mesh'])
         if 'gaussian' in formats:
-            ret['gaussian'] = self.models['slat_decoder_gs'](slat)
+            ret['gaussian'] = self.load_model('slat_decoder_gs')(slat)
+            self.unload_models(['slat_decoder_gs'])
         if 'radiance_field' in formats:
-            ret['radiance_field'] = self.models['slat_decoder_rf'](slat)
+            ret['radiance_field'] = self.load_model('slat_decoder_rf')(slat)
+            self.unload_models(['slat_decoder_rf'])
+        torch.cuda.empty_cache()
         return ret
     
     def sample_slat(
@@ -233,7 +259,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             sampler_params (dict): Additional parameters for the sampler.
         """
         # Sample structured latent
-        flow_model = self.models['slat_flow_model']
+        flow_model = self.load_model('slat_flow_model')
         noise = sp.SparseTensor(
             feats=torch.randn(coords.shape[0], flow_model.in_channels).to(self.device),
             coords=coords,
@@ -246,6 +272,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             **sampler_params,
             verbose=True
         ).samples
+        self.unload_models(['slat_flow_model'])
 
         std = torch.tensor(self.slat_normalization['std'])[None].to(slat.device)
         mean = torch.tensor(self.slat_normalization['mean'])[None].to(slat.device)
@@ -274,6 +301,7 @@ class TrellisImageTo3DPipeline(Pipeline):
             slat_sampler_params (dict): Additional parameters for the structured latent sampler.
             preprocess_image (bool): Whether to preprocess the image.
         """
+        self.unload_models(['slat_decoder_mesh', 'slat_decoder_gs', 'slat_decoder_rf'])
         if preprocess_image:
             image = self.preprocess_image(image)
         cond = self.get_cond([image])
