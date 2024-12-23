@@ -63,6 +63,7 @@ class TrellisImageTo3DPipeline(Pipeline):
         for key in model_keys:
             if key in self.models:
                 self.models[key].to(torch.device("cpu"))
+        torch.cuda.empty_cache()
             
     @staticmethod
     def from_pretrained(path: str) -> "TrellisImageTo3DPipeline":
@@ -217,6 +218,7 @@ class TrellisImageTo3DPipeline(Pipeline):
 
         return coords
 
+    @torch.no_grad()
     def decode_slat(
         self,
         slat: sp.SparseTensor,
@@ -242,7 +244,6 @@ class TrellisImageTo3DPipeline(Pipeline):
         if 'radiance_field' in formats:
             ret['radiance_field'] = self.load_model('slat_decoder_rf')(slat)
             self.unload_models(['slat_decoder_rf'])
-        torch.cuda.empty_cache()
         return ret
     
     def sample_slat(
