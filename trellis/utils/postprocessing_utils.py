@@ -447,7 +447,7 @@ def to_glb(
     texture = bake_texture(
         vertices, faces, uvs,
         observations, masks, extrinsics, intrinsics,
-        texture_size=texture_size, mode='opt',
+        texture_size=texture_size, mode='fast',
         lambda_tv=0.01,
         verbose=verbose
     )
